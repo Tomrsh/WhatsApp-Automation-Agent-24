@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Restaurant Control Panel</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
+    <script src="/socket.io/socket.io.js"></script>
+</head>
+<body class="bg-gray-900 text-white p-6">
+    <div class="flex justify-between mb-8 bg-gray-800 p-6 rounded-lg border-b-4 border-blue-500">
+        <h1 class="text-2xl font-bold">Restaurant Admin Dashboard</h1>
+        <div id="status" class="text-red-500 font-bold">WhatsApp: Connecting...</div>
+    </div>
+
+    <div class="grid grid-cols-1 md:grid-cols-4 gap-6">
+        <div class="bg-gray-800 p-4 rounded-lg">
+            <h2 class="font-bold border-b border-gray-700 mb-4 pb-2 text-blue-400">Settings</h2>
+            <div id="qr-box" class="bg-white p-2 rounded mb-4 flex justify-center min-h-[150px] items-center text-black italic">Wait for QR...</div>
+            <input id="blockNum" type="text" placeholder="Mobile No (91...)" class="w-full p-2 bg-gray-700 rounded mb-2">
+            <button onclick="toggleBot(true)" class="w-full bg-red-600 p-2 rounded mb-4 hover:bg-red-700 transition">Off Automation</button>
+            <button onclick="location.href='/download-report'" class="w-full bg-green-600 p-2 rounded hover:bg-green-700 transition">📥 Download XL Report</button>
+        </div>
+
+        <div class="md:col-span-3 bg-gray-800 p-4 rounded-lg">
+            <h2 class="font-bold border-b border-gray-700 mb-4 pb-2 text-blue-400">Live Orders</h2>
+            <div id="order-container" class="space-y-4"></div>
+        </div>
+    </div>
+
+    <script>
+        const firebaseConfig = { apiKey: "AIzaSyAb7V8Xxg5rUYi8UKChEd3rR5dglJ6bLhU", databaseURL: "https://t2-storage-4e5ca-default-rtdb.firebaseio.com" };
+        firebase.initializeApp(firebaseConfig);
+        const db = firebase.database();
+
+        const socket = io();
+        socket.on('qr', (qr) => {
+            document.getElementById('qr-box').innerHTML = `<img src="https://api.qrserver.com/v1/create-qr-code/?data=${encodeURIComponent(qr)}">`;
+        });
+        socket.on('status', (s) => {
+            document.getElementById('status').innerText = "WhatsApp: " + s;
+            document.getElementById('status').className = s === 'Connected' ? 'text-green-500 font-bold' : 'text-red-500 font-bold';
+        });
+
+        // Real-time Orders Listener
+        db.ref('orders/active').on('value', (snap) => {
+            const container = document.getElementById('order-container');
+            container.innerHTML = '';
+            snap.forEach(child => {
+                const o = child.val();
+                container.innerHTML += `
+                <div class="bg-gray-700 p-4 rounded-lg flex justify-between border-l-4 border-green-500">
+                    <div>
+                        <p class="text-blue-300 font-bold">${o.details} (₹${o.total})</p>
+                        <p class="text-sm">📍 ${o.address}</p>
+                        <p class="text-xs text-gray-400">${o.pay} | ${o.time}</p>
+                    </div>
+                    <button onclick="doneOrder('${o.id}')" class="bg-blue-600 px-4 py-2 rounded self-center hover:bg-blue-500">Done</button>
+                </div>`;
+            });
+        });
+
+        function doneOrder(id) {
+            db.ref('orders/active/' + id).once('value', (s) => {
+                db.ref('orders/completed/' + id).set(s.val());
+                db.ref('orders/active/' + id).remove();
+            });
+        }
+
+        function toggleBot(status) {
+            const num = document.getElementById('blockNum').value;
+            if(!num) return alert("Pehle number likhein!");
+            db.ref('settings/blocked/' + num).set(status);
+            alert("Automation disabled for " + num);
+        }
+
+        // Keep Alive (Server ko active rakhne ke liye)
+        setInterval(() => { fetch('/'); }, 120000);
+    </script>
+</body>
+</html>
