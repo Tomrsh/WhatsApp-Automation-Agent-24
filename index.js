@@ -9,7 +9,6 @@ const app = express();
 const http = require('http').createServer(app);
 const io = require('socket.io')(http);
 
-// --- FIREBASE CONFIG (Wahi jo aapne di thi) ---
 const firebaseConfig = {
     apiKey: "AIzaSyAb7V8Xxg5rUYi8UKChEd3rR5dglJ6bLhU",
     databaseURL: "https://t2-storage-4e5ca-default-rtdb.firebaseio.com",
@@ -17,20 +16,15 @@ const firebaseConfig = {
 const firebaseApp = initializeApp(firebaseConfig);
 const db = getDatabase(firebaseApp);
 
-const menu = {
-    "1": { item: "Paneer Butter Masala", price: 220 },
-    "2": { item: "Veg Biryani Full", price: 180 },
-    "3": { item: "Butter Naan", price: 40 },
-    "4": { item: "Cold Drink", price: 60 }
-};
+let sock;
+let contacts = [];
 
 async function startBot() {
-    const { state, saveCreds } = await useMultiFileAuthState('auth_info');
-    
-    const sock = makeWASocket({
+    const { state, saveCreds } = await useMultiFileAuthState('auth_session');
+    sock = makeWASocket({
         auth: state,
         printQRInTerminal: true,
-        browser: ["Restaurant Manager", "Chrome", "1.0.0"]
+        browser: ["Resto-Admin", "Chrome", "1.0.0"]
     });
 
     sock.ev.on('creds.update', saveCreds);
@@ -38,13 +32,15 @@ async function startBot() {
     sock.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect, qr } = update;
         if (qr) io.emit('qr', qr);
+        if (connection === 'open') io.emit('status', 'Connected');
         if (connection === 'close') {
-            const shouldReconnect = (lastDisconnect.error instanceof Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
-            if (shouldReconnect) startBot();
-        } else if (connection === 'open') {
-            io.emit('status', 'Connected');
-            console.log("✅ WhatsApp Connected!");
+            if ((lastDisconnect.error instanceof Boom)?.output?.statusCode !== DisconnectReason.loggedOut) startBot();
         }
+    });
+
+    sock.ev.on('messaging-history.set', ({ contacts: newContacts }) => {
+        contacts = newContacts.map(c => ({ id: c.id, name: c.name || c.id.split('@')[0] }));
+        io.emit('contacts', contacts);
     });
 
     sock.ev.on('messages.upsert', async ({ messages }) => {
@@ -55,75 +51,59 @@ async function startBot() {
         const msgText = m.message.conversation || m.message.extendedTextMessage?.text || "";
         const cleanId = from.replace(/\D/g, '');
 
-        // Check if automation is OFF for this user
-        const blockSnap = await get(ref(db, `settings/blocked/${cleanId}`));
-        if (blockSnap.exists() && blockSnap.val() === true) return;
+        // Automation Check
+        const blockSnap = await get(ref(db, `blocked_users/${cleanId}`));
+        if (blockSnap.exists()) return;
 
         const userRef = ref(db, `sessions/${cleanId}`);
         const snap = await get(userRef);
         let session = snap.val() || { step: 0 };
 
+        // Simple State Machine for Ordering
         if (session.step === 0) {
-            let welcome = `*Aapka Swagat Hai!* 🍴\n`;
-            for (let id in menu) welcome += `\n*${id}.* ${menu[id].item} - ₹${menu[id].price}`;
-            welcome += `\n\nOrder ke liye *Number* likhen:`;
-            await sock.sendMessage(from, { text: welcome });
+            let menuTxt = `*Welcome to Royal Kitchen* 🍴\n\n1. Paneer Butter - ₹250\n2. Chicken Biryani - ₹350\n3. Cold Coffee - ₹90\n\nDish No. bhejein:`;
+            await sock.sendMessage(from, { text: menuTxt });
             await update(userRef, { step: 1 });
-        } 
-        else if (session.step === 1) {
-            if (menu[msgText]) {
-                await update(userRef, { step: 2, item: menu[msgText].item, price: menu[msgText].price });
-                await sock.sendMessage(from, { text: `Aapne ${menu[msgText].item} chuna. Quantity likhen:` });
+        } else if (session.step === 1) {
+            const items = {"1":"Paneer Butter", "2":"Chicken Biryani", "3":"Cold Coffee"};
+            const prices = {"1":250, "2":350, "3":90};
+            if(items[msgText]) {
+                await update(userRef, { step: 2, item: items[msgText], price: prices[msgText] });
+                await sock.sendMessage(from, { text: "Kitni quantity?" });
             }
-        }
-        else if (session.step === 2) {
+        } else if (session.step === 2) {
             await update(userRef, { step: 3, qty: msgText });
-            await sock.sendMessage(from, { text: `Payment Method:\n1. Cash (COD)\n2. Online` });
-        }
-        else if (session.step === 3) {
-            await update(userRef, { step: 4, pay: msgText == '1' ? 'COD' : 'Online' });
-            await sock.sendMessage(from, { text: `Order ke liye *Naam aur Pura Address* bhejein:` });
-        }
-        else if (session.step === 4) {
-            const orderId = "ORD" + Math.floor(Math.random() * 9000);
-            const finalOrder = {
-                id: orderId,
-                customer: from,
-                details: `${session.item} (Qty: ${session.qty})`,
-                total: session.price * (parseInt(session.qty) || 1),
-                address: msgText,
-                pay: session.pay,
-                time: new Date().toLocaleString(),
-                timestamp: Date.now()
-            };
-            await set(ref(db, 'orders/active/' + orderId), finalOrder);
-            await sock.sendMessage(from, { text: `✅ Order Placed! ID: ${orderId}\nTotal: ₹${finalOrder.total}` });
+            await sock.sendMessage(from, { text: "Apna Naam aur Address bhejein:" });
+        } else if (session.step === 3) {
+            const orderId = "ORD" + Math.floor(Math.random()*9000);
+            const total = session.price * parseInt(session.qty);
+            const orderData = { id: orderId, customer: from, details: session.item, qty: session.qty, total, address: msgText, time: new Date().toLocaleTimeString(), timestamp: Date.now() };
+            await set(ref(db, 'orders/active/' + orderId), orderData);
+            await sock.sendMessage(from, { text: `✅ Order Placed! ID: ${orderId}\nTotal: ₹${total}` });
             await remove(userRef);
         }
     });
 }
 
-// Excel Report & 7-Day Auto Delete
+// Socket listener for Mark Done
+io.on('connection', (socket) => {
+    socket.on('mark-done', async (order) => {
+        await sock.sendMessage(order.customer, { text: `🎉 Aapka Order (#${order.id}) Deliver ho gaya hai. Thank you!` });
+    });
+});
+
+// Download Report
 app.get('/download-report', async (req, res) => {
     let workbook = new ExcelJS.Workbook();
-    let sheet = workbook.addWorksheet('Orders');
-    sheet.columns = [{header:'ID', key:'id'}, {header:'Item', key:'details'}, {header:'Total', key:'total'}, {header:'Address', key:'address'}];
+    let sheet = workbook.addWorksheet('Sales');
+    sheet.columns = [{header:'Date', key:'time'}, {header:'Item', key:'details'}, {header:'Total', key:'total'}];
     const snap = await get(ref(db, 'orders/completed'));
-    snap.forEach(c => { sheet.addRow(c.val()); });
+    snap.forEach(c => sheet.addRow(c.val()));
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', 'attachment; filename=Report.xlsx');
+    res.setHeader('Content-Disposition', 'attachment; filename=Sales.xlsx');
     await workbook.xlsx.write(res); res.end();
 });
 
-// Purge old orders
-setInterval(async () => {
-    const weekAgo = Date.now() - (7 * 24 * 60 * 60 * 1000);
-    const completedRef = ref(db, 'orders/completed');
-    const oldQuery = query(completedRef, orderByChild('timestamp'), endAt(weekAgo));
-    const snap = await get(oldQuery);
-    snap.forEach(c => remove(c.ref));
-}, 86400000);
-
 startBot();
 app.get('/', (req, res) => res.sendFile(__dirname + '/index.html'));
-http.listen(3000, () => console.log('Server Live: http://localhost:3000'));
+http.listen(3000, () => console.log('Server Live on Port 3000'));
